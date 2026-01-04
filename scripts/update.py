@@ -164,12 +164,18 @@ def parse_inbox_todo_section(text):
             continue
         if not l or section is None:
             continue
+        # Extract checkbox value if present: "- [ ]", "- [v]", "- [x]" etc.
+        box = " "
+        m_box = re.match(r"^[-*]\s*\[([^\]]?)\]", l)
+        if m_box:
+            box = (m_box.group(1) or " ").strip() or " "
+
         # lines like "- [ ] title (id:xxxx)" or "- title (id:xxxx)"
         m = re.search(r"\(id:([^\)]+)\)", l)
         if m:
             task_id = m.group(1).strip()
             if task_id:
-                mapping[task_id] = section
+                mapping[task_id] = {"section": section, "box": box}
     return mapping
 
 
@@ -186,29 +192,42 @@ def apply_inbox_todo_changes(text, tasks):
     dropped_ids = set()
     log_events: list[str] = []
 
-    for task_id, section in mapping.items():
+    for task_id, info in mapping.items():
+        section = info["section"]
+        box = (info.get("box") or " ").lower()
         t = tasks_by_id.get(task_id)
         if not t:
             continue
         old_status = t.get("status")
         title = t.get("title", "(无标题)")
 
-        if section == "TODO":
-            # 回到 TODO，即重新标记为 open（不额外记录 LOG）
-            t["status"] = "open"
-        elif section == "DONE":
-            if old_status != "done":
-                t["status"] = "done"
-                log_events.append(f"完成TODO项目：{title}")
-        elif section == "DELETE":
-            if old_status != "canceled":
-                t["status"] = "canceled"
-                log_events.append(f"删除TODO项目：{title}")
-        elif section == "DROP":
-            # 只有来自 DONE 或 DELETE（canceled）的任务才允许真正删除
+        # DROP 区域保持之前的安全逻辑：只有来自 DONE/DELETE 的任务才允许彻底删除
+        if section == "DROP":
             if t.get("status") in {"done", "canceled"}:
                 dropped_ids.add(task_id)
                 log_events.append(f"彻底删除TODO项目：{title}")
+            continue
+
+        # 其他区域：根据方括号内的值决定状态
+        # [ ] -> open; [v] -> done; [x] -> canceled
+        if box == "v":
+            new_status = "done"
+        elif box == "x":
+            new_status = "canceled"
+        else:
+            new_status = "open"
+
+        if new_status == old_status:
+            continue
+
+        t["status"] = new_status
+        if new_status == "done":
+            log_events.append(f"完成TODO项目：{title}")
+        elif new_status == "canceled":
+            log_events.append(f"删除TODO项目：{title}")
+        elif new_status == "open":
+            # 从 DONE/DELETE 回到 TODO 时可选择不记录日志，避免噪音
+            pass
 
     if dropped_ids:
         tasks = [t for t in tasks if t.get("id") not in dropped_ids]
@@ -264,15 +283,15 @@ def render_todo_section(tasks):
         tags = task.get("tags") or []
         due = task.get("due")
         priority = task.get("priority")
+        # 优先级放在开头，使用大括号表示，例如 {3}
+        pri_prefix = f"{{{priority}}} " if priority is not None else ""
         meta_parts = []
-        if priority:
-            meta_parts.append(f"!{priority}")
         if tags:
             meta_parts.append("@" + ",@".join(tags))
         if due:
             meta_parts.append(f"due:{due}")
         meta = f" ({', '.join(meta_parts)})" if meta_parts else ""
-        return f"- [{checkbox}] {title}{meta} (id:{task.get('id')})"
+        return f"- [{checkbox}] {pri_prefix}{title}{meta} (id:{task.get('id')})"
 
     # Group tasks by status and sort
     open_tasks = _sort_tasks([t for t in tasks if t.get("status") == "open"])
@@ -294,7 +313,8 @@ def render_todo_section(tasks):
         lines.append("- [ ] (暂无 DONE)")
     else:
         for t in done_tasks:
-            lines.append(task_line(t, "x"))
+            # 使用 [v] 表示已完成任务
+            lines.append(task_line(t, "v"))
 
     lines.append("")
     lines.append("### DELETE")
@@ -303,7 +323,8 @@ def render_todo_section(tasks):
         lines.append("- [ ] (暂无 DELETE)")
     else:
         for t in deleted_tasks:
-            lines.append(task_line(t, " "))
+            # 使用 [x] 表示 DELETE 区域的任务
+            lines.append(task_line(t, "x"))
 
     lines.append("")
     lines.append("### DROP")
@@ -421,8 +442,8 @@ def parse_todo_line(raw):
     优先级使用 !1-!9，数字越小优先级越高。
     """
     line = raw.strip()
-    # remove leading checkbox "- [ ]" or "- [x]" if present
-    line = re.sub(r"^[-*]\s*\[(?: |x|X)\]\s*", "", line)
+    # remove leading checkbox "- [ ]" or "- [x]" or "- [v]" if present
+    line = re.sub(r"^[-*]\s*\[(?: |x|X|v|V)\]\s*", "", line)
     # Extract due:YYYY-MM-DD
     due = None
     m_due = re.search(r"due:(\d{4}-\d{2}-\d{2})", line)
