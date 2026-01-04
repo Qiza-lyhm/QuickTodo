@@ -10,7 +10,7 @@ LOGS_DIR = BASE_DIR / "logs"
 TODOS_DIR = BASE_DIR / "todos"
 TASKS_FILE = TODOS_DIR / "tasks.yaml"
 TODO_MD_FILE = TODOS_DIR / "todo.md"
-LATEST_FILE = BASE_DIR / "lastest.md"
+LATEST_FILE = BASE_DIR / "latest.md"
 
 
 def load_tasks():
@@ -505,8 +505,8 @@ def main():
         rolled_text = upsert_todo_section(rolled_text, tasks)
         INBOX_FILE.write_text(rolled_text, encoding="utf-8")
 
-        # 即使没有新的日志块，也更新 lastest.md（保持和 logs 当前状态一致）
-        _generate_lastest()
+        # 即使没有新的日志块，也更新 latest.md（保持和 logs 当前状态一致）
+        _generate_latest()
 
         print("No update blocks (## YYYY-MM-DD ...) found in inbox.")
         return
@@ -543,14 +543,14 @@ def main():
 
     INBOX_FILE.write_text(new_inbox, encoding="utf-8")
 
-    # 同时生成 lastest 文件：包含今天和昨天的全部日志内容
-    _generate_lastest()
+    # 同时生成 latest 文件：包含今天和昨天的全部日志内容
+    _generate_latest()
 
     print(f"Processed {len(processed)} update block(s).")
 
 
-def _generate_lastest():
-    """Generate lastest.md containing today and yesterday logs."""
+def _generate_latest():
+    """Generate latest.md containing today and yesterday logs."""
     today = date.today()
     yesterday = today - timedelta(days=1)
     parts = ["# 最近两天工作记录", ""]
