@@ -1,0 +1,5 @@
+# Ignore personal logs and task state
+logs/
+todos/
+lastest.md
+inbox/current.md
