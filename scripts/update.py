@@ -119,25 +119,38 @@ def apply_inbox_todo_changes(text, tasks):
 
     tasks_by_id = {t.get("id"): t for t in tasks if t.get("id")}
     dropped_ids = set()
+    log_events: list[str] = []
 
     for task_id, section in mapping.items():
         t = tasks_by_id.get(task_id)
         if not t:
             continue
+        old_status = t.get("status")
+        title = t.get("title", "(无标题)")
+
         if section == "TODO":
-            # 回到 TODO，即重新标记为 open
+            # 回到 TODO，即重新标记为 open（不额外记录 LOG）
             t["status"] = "open"
         elif section == "DONE":
-            t["status"] = "done"
+            if old_status != "done":
+                t["status"] = "done"
+                log_events.append(f"完成TODO项目：{title}")
         elif section == "DELETE":
-            t["status"] = "canceled"
+            if old_status != "canceled":
+                t["status"] = "canceled"
+                log_events.append(f"删除TODO项目：{title}")
         elif section == "DROP":
             # 只有来自 DONE 或 DELETE（canceled）的任务才允许真正删除
             if t.get("status") in {"done", "canceled"}:
                 dropped_ids.add(task_id)
+                log_events.append(f"彻底删除TODO项目：{title}")
 
     if dropped_ids:
         tasks = [t for t in tasks if t.get("id") not in dropped_ids]
+
+    # 将 TODO 状态变更操作写入今天的 LOG
+    if log_events:
+        append_to_daily_log(date.today(), log_events)
 
     return tasks
 
@@ -366,6 +379,7 @@ def process_block(block, tasks):
         append_to_daily_log(block_dt.date(), items)
 
     # TODO_ADD → tasks.yaml (status=open)
+    todo_log_events: list[str] = []
     for raw in section_lines["TODO_ADD"]:
         title, tags, due = parse_todo_line(raw)
         if not title:
@@ -384,6 +398,7 @@ def process_block(block, tasks):
                 "tags": tags,
             }
         )
+        todo_log_events.append(f"添加TODO项目：{title}")
 
     # TODO_DONE → mark done if possible; otherwise create done task
     for raw in section_lines["TODO_DONE"]:
@@ -415,6 +430,10 @@ def process_block(block, tasks):
                     "tags": tags,
                 }
             )
+        todo_log_events.append(f"完成TODO项目：{title}")
+    # 将本块中的 TODO 操作也写入对应日期的 LOG
+    if todo_log_events:
+        append_to_daily_log(block_dt.date(), todo_log_events)
     return True
 
 
