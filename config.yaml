@@ -1,2 +1,20 @@
-# Journal system configuration (reserved for future use)
-# You can later add settings like default paths, tags, etc.
+"""
+QuickTodo 配置文件
+
+当前可用配置：
+
+todo:
+	# 任务排序模式：priority（默认，按优先级 1-9）、created_at（按创建时间）、tag（按第一个标签）
+	sort_mode: priority
+
+	# 当存在多个 tag 时，tag 排序使用第几个 tag（从 0 开始计数），通常保持 0 即第一个 tag
+	tag_index_for_sort: 0
+
+	# 未显式指定优先级时使用的默认优先级（1-9，数字越小优先级越高）
+	default_priority: 5
+"""
+
+todo:
+	sort_mode: priority
+	tag_index_for_sort: 0
+	default_priority: 5

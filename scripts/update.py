@@ -11,6 +11,7 @@ TODOS_DIR = BASE_DIR / "todos"
 TASKS_FILE = TODOS_DIR / "tasks.yaml"
 TODO_MD_FILE = TODOS_DIR / "todo.md"
 LATEST_FILE = BASE_DIR / "latest.md"
+CONFIG_FILE = BASE_DIR / "config.yaml"
 
 
 def load_tasks():
@@ -22,6 +23,35 @@ def load_tasks():
     return yaml.safe_load(text) or []
 
 
+def load_config():
+    """Load configuration from config.yaml, return a dict.
+
+    Structure example:
+
+    todo:
+      sort_mode: priority | created_at | tag
+      tag_index_for_sort: 0
+      default_priority: 5
+    """
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        data = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data or {}
+
+
+def _get_todo_config():
+    cfg = load_config()
+    todo_cfg = cfg.get("todo") or {}
+    return {
+        "sort_mode": todo_cfg.get("sort_mode", "priority"),
+        "tag_index_for_sort": int(todo_cfg.get("tag_index_for_sort", 0) or 0),
+        "default_priority": int(todo_cfg.get("default_priority", 5) or 5),
+    }
+
+
 def save_tasks(tasks):
     TASKS_FILE.write_text(
         yaml.safe_dump(tasks, allow_unicode=True, sort_keys=False),
@@ -30,8 +60,40 @@ def save_tasks(tasks):
 
 
 def regenerate_todo_md(tasks):
+    cfg = _get_todo_config()
+
+    def _sort_tasks(ts):
+        mode = cfg["sort_mode"]
+        tag_idx = cfg["tag_index_for_sort"]
+        default_pri = cfg["default_priority"]
+
+        def first_tag(task):
+            tags = task.get("tags") or []
+            if 0 <= tag_idx < len(tags):
+                return tags[tag_idx]
+            return tags[0] if tags else ""
+
+        def pri(task):
+            p = task.get("priority")
+            try:
+                return int(p)
+            except (TypeError, ValueError):
+                return default_pri
+
+        def key(task):
+            created = task.get("created_at") or ""
+            title = task.get("title") or ""
+            if mode == "created_at":
+                return (created, title)
+            if mode == "tag":
+                return (first_tag(task), pri(task), created, title)
+            # default: priority
+            return (pri(task), created, title)
+
+        return sorted(ts, key=key)
+
     lines = ["# 当前 TODO 列表（未完成）", "",]
-    open_tasks = [t for t in tasks if t.get("status") == "open"]
+    open_tasks = _sort_tasks([t for t in tasks if t.get("status") == "open"])
     if not open_tasks:
         lines.append("_暂无未完成任务。_")
     else:
@@ -39,7 +101,10 @@ def regenerate_todo_md(tasks):
             title = t.get("title", "(无标题)")
             tags = t.get("tags") or []
             due = t.get("due")
+            priority = t.get("priority")
             meta_parts = []
+            if priority:
+                meta_parts.append(f"!{priority}")
             if tags:
                 meta_parts.append("@" + ",@".join(tags))
             if due:
@@ -157,6 +222,38 @@ def apply_inbox_todo_changes(text, tasks):
 
 def render_todo_section(tasks):
     """Render the TODO LIST section for inbox/current.md from tasks.yaml."""
+    cfg = _get_todo_config()
+
+    def _sort_tasks(ts):
+        mode = cfg["sort_mode"]
+        tag_idx = cfg["tag_index_for_sort"]
+        default_pri = cfg["default_priority"]
+
+        def first_tag(task):
+            tags = task.get("tags") or []
+            if 0 <= tag_idx < len(tags):
+                return tags[tag_idx]
+            return tags[0] if tags else ""
+
+        def pri(task):
+            p = task.get("priority")
+            try:
+                return int(p)
+            except (TypeError, ValueError):
+                return default_pri
+
+        def key(task):
+            created = task.get("created_at") or ""
+            title = task.get("title") or ""
+            if mode == "created_at":
+                return (created, title)
+            if mode == "tag":
+                return (first_tag(task), pri(task), created, title)
+            # default: priority
+            return (pri(task), created, title)
+
+        return sorted(ts, key=key)
+
     lines = [
         "## TODO LIST",
         "",
@@ -166,7 +263,10 @@ def render_todo_section(tasks):
         title = task.get("title", "(无标题)")
         tags = task.get("tags") or []
         due = task.get("due")
+        priority = task.get("priority")
         meta_parts = []
+        if priority:
+            meta_parts.append(f"!{priority}")
         if tags:
             meta_parts.append("@" + ",@".join(tags))
         if due:
@@ -174,10 +274,10 @@ def render_todo_section(tasks):
         meta = f" ({', '.join(meta_parts)})" if meta_parts else ""
         return f"- [{checkbox}] {title}{meta} (id:{task.get('id')})"
 
-    # Group tasks by status
-    open_tasks = [t for t in tasks if t.get("status") == "open"]
-    done_tasks = [t for t in tasks if t.get("status") == "done"]
-    deleted_tasks = [t for t in tasks if t.get("status") == "canceled"]
+    # Group tasks by status and sort
+    open_tasks = _sort_tasks([t for t in tasks if t.get("status") == "open"])
+    done_tasks = _sort_tasks([t for t in tasks if t.get("status") == "done"])
+    deleted_tasks = _sort_tasks([t for t in tasks if t.get("status") == "canceled"])
 
     lines.append("### TODO")
     lines.append("")
@@ -315,9 +415,10 @@ def append_to_daily_log(dt, log_items):
 
 
 def parse_todo_line(raw):
-    """Parse a TODO line into (title, tags, due).
+    """Parse a TODO line into (title, tags, due, priority).
 
-    Example: "完成模块 A 的单元测试 @projectA due:2026-01-05"
+    Example: "完成模块 A 的单元测试 @projectA !3 due:2026-01-05"
+    优先级使用 !1-!9，数字越小优先级越高。
     """
     line = raw.strip()
     # remove leading checkbox "- [ ]" or "- [x]" if present
@@ -328,11 +429,17 @@ def parse_todo_line(raw):
     if m_due:
         due = m_due.group(1)
         line = line.replace(m_due.group(0), "").strip()
+    # Extract priority !1-!9
+    priority = None
+    m_pri = re.search(r"!(\d)", line)
+    if m_pri:
+        priority = int(m_pri.group(1))
+        line = line.replace(m_pri.group(0), "").strip()
     # Extract @tags
     tags = re.findall(r"@(\w+)", line)
     # Remove @tags from title
     title = re.sub(r"@(\w+)", "", line).strip()
-    return title, tags, due
+    return title, tags, due, priority
 
 
 def find_task_by_title(tasks, title):
@@ -380,8 +487,11 @@ def process_block(block, tasks):
 
     # TODO_ADD → tasks.yaml (status=open)
     todo_log_events: list[str] = []
+    cfg = _get_todo_config()
+    default_priority = cfg["default_priority"]
+
     for raw in section_lines["TODO_ADD"]:
-        title, tags, due = parse_todo_line(raw)
+        title, tags, due, priority = parse_todo_line(raw)
         if not title:
             continue
         now = datetime.now()
@@ -396,13 +506,14 @@ def process_block(block, tasks):
                 "updated_at": created_at,
                 "due": due,
                 "tags": tags,
+                "priority": priority if priority is not None else default_priority,
             }
         )
         todo_log_events.append(f"添加TODO项目：{title}")
 
     # TODO_DONE → mark done if possible; otherwise create done task
     for raw in section_lines["TODO_DONE"]:
-        title, tags, due = parse_todo_line(raw)
+        title, tags, due, priority = parse_todo_line(raw)
         if not title:
             continue
         task = find_task_by_title(tasks, title)
@@ -416,6 +527,8 @@ def process_block(block, tasks):
             if tags:
                 old_tags = set(task.get("tags") or [])
                 task["tags"] = sorted(old_tags.union(tags))
+            if priority is not None:
+                task["priority"] = priority
         else:
             # 为新建的已完成任务使用当前时间生成 id
             task_id = now.strftime("%Y%m%d-%H%M-%f") + "-done"
@@ -428,6 +541,7 @@ def process_block(block, tasks):
                     "updated_at": ts,
                     "due": due,
                     "tags": tags,
+                    "priority": priority if priority is not None else default_priority,
                 }
             )
         todo_log_events.append(f"完成TODO项目：{title}")
