@@ -45,10 +45,10 @@
 
 2. **在命令行中运行更新脚本**
 
-	 打开终端（PowerShell 等），进入项目目录：
+	 打开终端（PowerShell 等），进入本项目根目录（包含 README.md 的那个目录）：
 
 	 ```powershell
-	 cd "c:\Users\tangyueran\工作日志\QuickTodo"
+	 cd path\to\QuickTodo   # 将 path\to\QuickTodo 替换为你本地的实际路径
 	 python .\scripts\update.py
 	 ```
 
