@@ -747,19 +747,40 @@ def _generate_latest():
         parts.append(f"## {date_str}")
         parts.append("")
 
-        # 普通 LOG 记录
+        # 普通 LOG 记录（在 latest.md 中按时间逆序展示条目，最近的在最上方）
         if log_lines:
             parts.append("### LOG")
             parts.append("")
-            parts.extend(log_lines)
-            if log_lines and log_lines[-1].strip():
+
+            # 拆分为“普通文本/标题行”和“具体 LOG 条目行”（形如 "- HH:MM 文本"）
+            log_entry_re = re.compile(r"^- \d{2}:\d{2} ")
+            log_entry_lines = []
+            log_other_lines = []
+            for line in log_lines:
+                stripped = line.strip()
+                if log_entry_re.match(stripped):
+                    log_entry_lines.append(line)
+                else:
+                    log_other_lines.append(line)
+
+            # 先保持非条目行的原始顺序（例如空行、原文件中的 ## LOG 标题等）
+            if log_other_lines:
+                parts.extend(log_other_lines)
+                if log_other_lines[-1].strip():
+                    parts.append("")
+
+            # 再把具体 LOG 条目按时间逆序输出，最近的在最上方
+            if log_entry_lines:
+                for line in reversed(log_entry_lines):
+                    parts.append(line)
                 parts.append("")
 
-        # TODO 操作记录
+        # TODO 操作记录（按时间逆序显示，最近的在最上方）
         if todo_op_lines:
             parts.append("### TODO 操作")
             parts.append("")
-            parts.extend(todo_op_lines)
+            for line in reversed(todo_op_lines):
+                parts.append(line)
             parts.append("")
 
     LATEST_FILE.write_text("\n".join(parts) + "\n", encoding="utf-8")
