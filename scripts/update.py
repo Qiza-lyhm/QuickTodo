@@ -133,7 +133,13 @@ def parse_inbox_todo_section(text):
     ### DELETE
     - ... (id:789)
 
-    Returns: {task_id: section_name}
+    支持从行内解析：
+    - 方括号中的状态标记：[ ] / [v] / [x]
+    - 优先级：例如 "{3} 标题"
+    - 标签：例如 "(@tag1,@tag2, ...)"
+    - 截止日期：例如 "due:2026-01-05"
+
+    Returns: {task_id: {"section", "box", "priority", "tags", "due"}}
     """
     lines = text.splitlines()
     start = None
@@ -170,12 +176,42 @@ def parse_inbox_todo_section(text):
         if m_box:
             box = (m_box.group(1) or " ").strip() or " "
 
-        # lines like "- [ ] title (id:xxxx)" or "- title (id:xxxx)"
+        # lines like "- [ ] {3} title (@tag1,@tag2, due:YYYY-MM-DD) (id:xxxx)"
         m = re.search(r"\(id:([^\)]+)\)", l)
         if m:
             task_id = m.group(1).strip()
             if task_id:
-                mapping[task_id] = {"section": section, "box": box}
+                # 解析优先级 {N}
+                priority = None
+                m_pri = re.search(r"\{(\d+)\}", l)
+                if m_pri:
+                    try:
+                        priority = int(m_pri.group(1))
+                    except ValueError:
+                        priority = None
+
+                # 解析标签 @tag1,@tag2
+                tags = []
+                m_tags = re.search(r"@(\w+(?:,@\w+)*)", l)
+                if m_tags:
+                    tag_str = m_tags.group(1)
+                    if tag_str:
+                        # 形如 "tag1,@tag2" -> ["tag1", "tag2"]
+                        tags = [part.lstrip("@") for part in tag_str.split(",@") if part]
+
+                # 解析截止日期 due:YYYY-MM-DD
+                due = None
+                m_due = re.search(r"due:(\d{4}-\d{2}-\d{2})", l)
+                if m_due:
+                    due = m_due.group(1)
+
+                mapping[task_id] = {
+                    "section": section,
+                    "box": box,
+                    "priority": priority,
+                    "tags": tags,
+                    "due": due,
+                }
     return mapping
 
 
@@ -201,11 +237,17 @@ def apply_inbox_todo_changes(text, tasks):
         old_status = t.get("status")
         title = t.get("title", "(无标题)")
 
+        # 从 TODO LIST 行中解析出的元信息（优先级、标签、截止日期）
+        new_priority = info.get("priority")
+        new_tags = info.get("tags") or []
+        new_due = info.get("due")
+
         # DROP 区域保持之前的安全逻辑：只有来自 DONE/DELETE 的任务才允许彻底删除
         if section == "DROP":
             if t.get("status") in {"done", "canceled"}:
                 dropped_ids.add(task_id)
                 log_events.append(f"彻底删除TODO项目：{title}")
+            # DROP 区域仅用于彻底删除，不更新优先级/标签/截止日期
             continue
 
         # 其他区域：根据方括号内的值决定状态
@@ -217,17 +259,39 @@ def apply_inbox_todo_changes(text, tasks):
         else:
             new_status = "open"
 
-        if new_status == old_status:
-            continue
+        any_change = False
 
-        t["status"] = new_status
-        if new_status == "done":
-            log_events.append(f"完成TODO项目：{title}")
-        elif new_status == "canceled":
-            log_events.append(f"删除TODO项目：{title}")
-        elif new_status == "open":
-            # 从 DONE/DELETE 回到 TODO 时可选择不记录日志，避免噪音
-            pass
+        # 状态变更
+        if new_status != old_status:
+            t["status"] = new_status
+            any_change = True
+            if new_status == "done":
+                log_events.append(f"完成TODO项目：{title}")
+            elif new_status == "canceled":
+                log_events.append(f"删除TODO项目：{title}")
+            elif new_status == "open":
+                # 从 DONE/DELETE 回到 TODO 时可选择不记录日志，避免噪音
+                pass
+
+        # 优先级变更（如果用户在行内写了 {N}）
+        if new_priority is not None and new_priority != t.get("priority"):
+            t["priority"] = new_priority
+            any_change = True
+
+        # 标签变更（如果用户在行内写了 @tag）
+        if new_tags and new_tags != (t.get("tags") or []):
+            t["tags"] = new_tags
+            any_change = True
+
+        # 截止日期变更（如果用户在行内写了 due:YYYY-MM-DD）
+        if new_due and new_due != t.get("due"):
+            t["due"] = new_due
+            any_change = True
+
+        # 如果有任何字段变更，更新 updated_at 时间戳
+        if any_change:
+            now = datetime.now()
+            t["updated_at"] = now.strftime("%Y-%m-%d %H:%M")
 
     if dropped_ids:
         tasks = [t for t in tasks if t.get("id") not in dropped_ids]
