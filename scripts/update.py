@@ -704,7 +704,12 @@ def main():
 
 
 def _generate_latest():
-    """Generate latest.md containing today and yesterday logs."""
+    """Generate latest.md containing today and yesterday logs.
+
+    在 latest.md 中将普通 LOG 记录与 TODO 操作记录分开展示：
+    - 上方：LOG 记录
+    - 下方：TODO 操作（添加/完成/删除/彻底删除 TODO 项）
+    """
     today = date.today()
     yesterday = today - timedelta(days=1)
     parts = ["# 最近两天工作记录", ""]
@@ -716,14 +721,46 @@ def _generate_latest():
         day_file = LOGS_DIR / year / year_month / f"{date_str}.md"
         if not day_file.exists():
             continue
-        content = day_file.read_text(encoding="utf-8").splitlines()
+
+        raw_lines = day_file.read_text(encoding="utf-8").splitlines()
         # 跳过文件内第一行的日期标题，以避免重复
-        if content and content[0].startswith("# "):
-            content = content[1:]
+        if raw_lines and raw_lines[0].startswith("# "):
+            raw_lines = raw_lines[1:]
+
+        # 拆分为普通 LOG 与 TODO 操作两部分
+        log_lines: list[str] = []
+        todo_op_lines: list[str] = []
+
+        for line in raw_lines:
+            stripped = line.strip()
+            # TODO 操作行是 append_to_daily_log 写入的，形如：
+            # - HH:MM 添加TODO项目：XXX
+            # - HH:MM 完成TODO项目：XXX
+            # - HH:MM 删除TODO项目：XXX
+            # - HH:MM 彻底删除TODO项目：XXX
+            if re.match(r"^- \d{2}:\d{2} (?:添加TODO项目|完成TODO项目|删除TODO项目|彻底删除TODO项目)：", stripped):
+                todo_op_lines.append(line)
+            else:
+                # 其余全部视为普通 LOG（包含原来的 ## LOG 标题等）
+                log_lines.append(line)
+
         parts.append(f"## {date_str}")
         parts.append("")
-        parts.extend(content)
-        parts.append("")
+
+        # 普通 LOG 记录
+        if log_lines:
+            parts.append("### LOG")
+            parts.append("")
+            parts.extend(log_lines)
+            if log_lines and log_lines[-1].strip():
+                parts.append("")
+
+        # TODO 操作记录
+        if todo_op_lines:
+            parts.append("### TODO 操作")
+            parts.append("")
+            parts.extend(todo_op_lines)
+            parts.append("")
 
     LATEST_FILE.write_text("\n".join(parts) + "\n", encoding="utf-8")
 
