@@ -400,36 +400,41 @@ def render_todo_section(tasks):
 
 
 def upsert_todo_section(inbox_text, tasks):
-    """Insert or replace the TODO LIST section in inbox/current.md."""
+    """Insert or replace the TODO LIST section in inbox/current.md.
+
+    新布局约定：
+    - 用户主要编辑的日期块（## YYYY-MM-DD ...）放在前面；
+    - 自动生成的 `## TODO LIST` 固定放在文件底部，便于折叠较长的 DONE 列表。
+    """
     lines = inbox_text.splitlines()
+
+    # 先移除已有的 TODO LIST 区域（如果存在）
     start = None
     for i, line in enumerate(lines):
         if TODO_LIST_HEADER_RE.match(line.strip()):
             start = i
             break
 
+    if start is not None:
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            if lines[j].startswith("## ") and not TODO_LIST_HEADER_RE.match(lines[j].strip()):
+                end = j
+                break
+        lines = lines[:start] + lines[end:]
+
+    # 生成新的 TODO LIST 段落
     new_section = render_todo_section(tasks).splitlines()
 
-    if start is None:
-        # Insert TODO LIST near the top: after first level-1 heading if present
-        insert_at = 0
-        if lines and lines[0].startswith("# "):
-            insert_at = 1
-            # skip possible blank line after title
-            if len(lines) > 1 and not lines[1].strip():
-                insert_at = 2
-        new_lines = lines[:insert_at] + new_section + [""] + lines[insert_at:]
-        return "\n".join(new_lines) + ("\n" if new_lines else "")
+    # 将 TODO LIST 追加到文件末尾，前面保留一行空行作为分隔
+    # 先去掉末尾多余空行
+    while lines and not lines[-1].strip():
+        lines.pop()
 
-    # Replace existing TODO LIST section
-    end = len(lines)
-    for j in range(start + 1, len(lines)):
-        if lines[j].startswith("## ") and not TODO_LIST_HEADER_RE.match(lines[j].strip()):
-            end = j
-            break
-
-    new_lines = lines[:start] + new_section + [""] + lines[end:]
-    return "\n".join(new_lines) + ("\n" if new_lines else "")
+    if lines:
+        lines.append("")
+    lines.extend(new_section)
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 UPDATE_HEADER_RE = re.compile(r"^##\s+(?P<dt>\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)\s*$")
