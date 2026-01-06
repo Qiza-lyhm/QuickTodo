@@ -781,9 +781,20 @@ def _generate_latest():
     """
     today = date.today()
     yesterday = today - timedelta(days=1)
-    parts = ["# 最近两天工作记录", ""]
 
-    for d in (today, yesterday):
+    days = [today, yesterday]
+
+    # 头部标题
+    parts: list[str] = ["# 最近两天工作记录", ""]
+
+    # 按任务标题对最近两天的 TODO 操作做合并
+    # key: title -> {"title", flags..., "last_type", "last_dt"}
+    todo_summary: dict[str, dict] = {}
+
+    # 保存每天的普通 LOG 行
+    per_day_log: dict[date, list[str]] = {}
+
+    for d in days:
         date_str = d.strftime("%Y-%m-%d")
         year = d.strftime("%Y")
         year_month = d.strftime("%Y-%m")
@@ -796,9 +807,7 @@ def _generate_latest():
         if raw_lines and raw_lines[0].startswith("# "):
             raw_lines = raw_lines[1:]
 
-        # 拆分为普通 LOG 与 TODO 操作两部分
         log_lines: list[str] = []
-        todo_op_lines: list[str] = []
 
         for line in raw_lines:
             stripped = line.strip()
@@ -807,11 +816,69 @@ def _generate_latest():
             # - HH:MM 完成TODO项目：XXX
             # - HH:MM 删除TODO项目：XXX
             # - HH:MM 彻底删除TODO项目：XXX
-            if re.match(r"^- \d{2}:\d{2} (?:添加TODO项目|完成TODO项目|删除TODO项目|彻底删除TODO项目)：", stripped):
-                todo_op_lines.append(line)
+            m_todo = re.match(
+                r"^- (?P<h>\d{2}):(?P<m>\d{2}) (?P<action>添加TODO项目|完成TODO项目|删除TODO项目|彻底删除TODO项目)：(?P<title>.+)$",
+                stripped,
+            )
+            if m_todo:
+                # 汇总结构：按两天内的最后一次状态 + 时间合并
+                h = int(m_todo.group("h"))
+                m = int(m_todo.group("m"))
+                action = m_todo.group("action")
+                title = m_todo.group("title").strip()
+
+                rec = todo_summary.get(title)
+                if rec is None:
+                    rec = {
+                        "title": title,
+                        "has_add": False,
+                        "has_done": False,
+                        "has_delete": False,
+                        "has_drop": False,
+                        "last_type": None,
+                        "last_dt": None,
+                    }
+                    todo_summary[title] = rec
+
+                dt_obj = datetime.combine(d, datetime.min.time()).replace(
+                    hour=h, minute=m
+                )
+
+                if action == "添加TODO项目":
+                    rec["has_add"] = True
+                    op_type = "add"
+                elif action == "完成TODO项目":
+                    rec["has_done"] = True
+                    op_type = "done"
+                elif action == "删除TODO项目":
+                    rec["has_delete"] = True
+                    op_type = "delete"
+                else:  # "彻底删除TODO项目"
+                    rec["has_drop"] = True
+                    op_type = "drop"
+
+                # 以最后一次状态和时间为准
+                if rec["last_dt"] is None or dt_obj >= rec["last_dt"]:
+                    rec["last_dt"] = dt_obj
+                    rec["last_type"] = op_type
             else:
                 # 其余全部视为普通 LOG（包含原来的 ## LOG 标题等）
                 log_lines.append(line)
+
+        per_day_log[d] = log_lines
+
+    # 按天输出：保持原有 "## 日期 + LOG + TODO 操作" 结构
+    for d in days:
+        date_str = d.strftime("%Y-%m-%d")
+        log_lines = per_day_log.get(d)
+
+        # 如果这一天既没有 LOG 也没有 TODO 操作，则跳过
+        has_todo_for_day = any(
+            rec.get("last_dt") and rec["last_dt"].date() == d
+            for rec in todo_summary.values()
+        )
+        if not log_lines and not has_todo_for_day:
+            continue
 
         parts.append(f"## {date_str}")
         parts.append("")
@@ -826,8 +893,8 @@ def _generate_latest():
             log_entry_lines = []
             log_other_lines = []
             for line in log_lines:
-                stripped = line.strip()
-                if log_entry_re.match(stripped):
+                stripped_line = line.strip()
+                if log_entry_re.match(stripped_line):
                     log_entry_lines.append(line)
                 else:
                     log_other_lines.append(line)
@@ -844,12 +911,51 @@ def _generate_latest():
                     parts.append(line)
                 parts.append("")
 
-        # TODO 操作记录（按时间逆序显示，最近的在最上方）
-        if todo_op_lines:
+        # TODO 操作记录：按任务标题合并后，只输出一行，减少噪音
+        # 规则：
+        # - 在最近两天内出现过 TODO 操作的任务才会出现在这里；
+        # - 以最后一次状态和时间为准；
+        # - 如果最后一次是 "彻底删除"，单独保留为 "彻底删除TODO项目"，不与其他状态合并。
+        day_recs = [
+            rec
+            for rec in todo_summary.values()
+            if rec.get("last_dt") and rec["last_dt"].date() == d
+        ]
+
+        if day_recs:
+            # 按最后一次时间倒序
+            day_recs.sort(key=lambda r: r["last_dt"], reverse=True)
+
             parts.append("### TODO 操作")
             parts.append("")
-            for line in reversed(todo_op_lines):
-                parts.append(line)
+
+            for rec in day_recs:
+                last_dt = rec["last_dt"]
+                time_str = last_dt.strftime("%H:%M")
+                last_type = rec["last_type"]
+                has_add = rec["has_add"]
+                has_done = rec["has_done"]
+                has_delete = rec["has_delete"]
+                has_drop = rec["has_drop"]
+
+                # 根据合并后的最终状态选择描述文案
+                if last_type == "drop" and has_drop:
+                    # 彻底删除单独保留
+                    label = "彻底删除TODO项目"
+                elif has_add and last_type == "done" and has_done:
+                    label = "添加并完成TODO项目"
+                elif has_add and last_type == "delete" and has_delete:
+                    label = "添加并删除TODO项目"
+                elif last_type == "done":
+                    label = "完成TODO项目"
+                elif last_type == "delete":
+                    label = "删除TODO项目"
+                elif last_type == "add":
+                    label = "添加TODO项目"
+                else:
+                    label = "TODO项目变更"
+
+                parts.append(f"- {time_str} {label}：{rec['title']}")
             parts.append("")
 
     LATEST_FILE.write_text("\n".join(parts) + "\n", encoding="utf-8")
