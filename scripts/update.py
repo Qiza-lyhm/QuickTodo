@@ -139,7 +139,20 @@ def parse_inbox_todo_section(text):
     - 标签：例如 "(@tag1,@tag2, ...)"
     - 截止日期：例如 "due:2026-01-05"
 
-    Returns: {task_id: {"section", "box", "priority", "tags", "due"}}
+    注意：为简化界面，current.md 中不再显示任务 id，
+    这里通过任务标题（以及标签/截止日期等）来回写到 tasks.yaml。
+
+    Returns: [
+        {
+            "section": str,   # TODO/DONE/DELETE/DROP
+            "box": str,       # 复选框中的字符：" ", "v", "x"
+            "title": str,     # 任务标题
+            "priority": int|None,
+            "tags": list[str],
+            "due": str|None,
+        },
+        ...
+    ]
     """
     lines = text.splitlines()
     start = None
@@ -158,7 +171,7 @@ def parse_inbox_todo_section(text):
             break
 
     section = None
-    mapping = {}
+    items: list[dict] = []
     for k in range(start + 1, end):
         l = lines[k].strip()
         if l.startswith("### "):
@@ -176,64 +189,85 @@ def parse_inbox_todo_section(text):
         if m_box:
             box = (m_box.group(1) or " ").strip() or " "
 
-        # lines like "- [ ] {3} title (@tag1,@tag2, due:YYYY-MM-DD) (id:xxxx)"
-        m = re.search(r"\(id:([^\)]+)\)", l)
-        if m:
-            task_id = m.group(1).strip()
-            if task_id:
-                # 解析优先级 {N}
+        # 解析优先级 {N}
+        priority = None
+        m_pri = re.search(r"\{(\d+)\}", l)
+        if m_pri:
+            try:
+                priority = int(m_pri.group(1))
+            except ValueError:
                 priority = None
-                m_pri = re.search(r"\{(\d+)\}", l)
-                if m_pri:
-                    try:
-                        priority = int(m_pri.group(1))
-                    except ValueError:
-                        priority = None
 
-                # 解析标签 @tag1,@tag2
-                tags = []
-                m_tags = re.search(r"@(\w+(?:,@\w+)*)", l)
-                if m_tags:
-                    tag_str = m_tags.group(1)
-                    if tag_str:
-                        # 形如 "tag1,@tag2" -> ["tag1", "tag2"]
-                        tags = [part.lstrip("@") for part in tag_str.split(",@") if part]
+        # 解析标签 @tag1,@tag2
+        tags = []
+        m_tags = re.search(r"@(\w+(?:,@\w+)*)", l)
+        if m_tags:
+            tag_str = m_tags.group(1)
+            if tag_str:
+                # 形如 "tag1,@tag2" -> ["tag1", "tag2"]
+                tags = [part.lstrip("@") for part in tag_str.split(",@") if part]
 
-                # 解析截止日期 due:YYYY-MM-DD
-                due = None
-                m_due = re.search(r"due:(\d{4}-\d{2}-\d{2})", l)
-                if m_due:
-                    due = m_due.group(1)
+        # 解析截止日期 due:YYYY-MM-DD
+        due = None
+        m_due = re.search(r"due:(\d{4}-\d{2}-\d{2})", l)
+        if m_due:
+            due = m_due.group(1)
 
-                mapping[task_id] = {
-                    "section": section,
-                    "box": box,
-                    "priority": priority,
-                    "tags": tags,
-                    "due": due,
-                }
-    return mapping
+        # 剩余部分作为标题：去掉 "- [ ]" / "- [v]" / "- [x]"、优先级和尾部括号
+        content = l
+        # 去掉开头的 - 或 *
+        content = re.sub(r"^[-*]\s*", "", content)
+        # 去掉复选框
+        content = re.sub(r"^\[[^\]]*\]\s*", "", content)
+        # 去掉形如 {3} 的优先级前缀
+        content = re.sub(r"^\{\d+\}\s*", "", content)
+        # 去掉末尾的元信息括号 "( ... )"（如果存在）
+        content = re.sub(r"\([^()]*\)\s*$", "", content)
+        title = content.strip()
+        if not title:
+            continue
+
+        items.append(
+            {
+                "section": section,
+                "box": box,
+                "title": title,
+                "priority": priority,
+                "tags": tags,
+                "due": due,
+            }
+        )
+    return items
 
 
 def apply_inbox_todo_changes(text, tasks):
     """Apply user's manual moves in TODO LIST (TODO/DONE/DELETE) to tasks.
 
-    We only update tasks whose id appears in the TODO LIST section.
+    现在不再在 current.md 中展示任务 id，
+    因此这里通过任务标题（及其行内元信息）来找到对应的任务。
     """
-    mapping = parse_inbox_todo_section(text)
-    if not mapping:
+    items = parse_inbox_todo_section(text)
+    if not items:
         return tasks
 
-    tasks_by_id = {t.get("id"): t for t in tasks if t.get("id")}
     dropped_ids = set()
     log_events: list[str] = []
+    used_ids: set[str] = set()
 
-    for task_id, info in mapping.items():
+    for info in items:
         section = info["section"]
         box = (info.get("box") or " ").lower()
-        t = tasks_by_id.get(task_id)
+
+        # 根据标题查找任务，避免多次匹配同一个任务
+        title_key = info.get("title", "")
+        t = find_task_by_title(tasks, title_key, exclude_ids=used_ids)
         if not t:
             continue
+
+        task_id = t.get("id")
+        if task_id:
+            used_ids.add(task_id)
+
         old_status = t.get("status")
         title = t.get("title", "(无标题)")
 
@@ -244,7 +278,7 @@ def apply_inbox_todo_changes(text, tasks):
 
         # DROP 区域保持之前的安全逻辑：只有来自 DONE/DELETE 的任务才允许彻底删除
         if section == "DROP":
-            if t.get("status") in {"done", "canceled"}:
+            if t.get("status") in {"done", "canceled"} and task_id:
                 dropped_ids.add(task_id)
                 log_events.append(f"彻底删除TODO项目：{title}")
             # DROP 区域仅用于彻底删除，不更新优先级/标签/截止日期
@@ -355,7 +389,8 @@ def render_todo_section(tasks):
         if due:
             meta_parts.append(f"due:{due}")
         meta = f" ({', '.join(meta_parts)})" if meta_parts else ""
-        return f"- [{checkbox}] {pri_prefix}{title}{meta} (id:{task.get('id')})"
+        # 不再在 current.md 中展示任务 id，只保留状态、优先级、标签和内容
+        return f"- [{checkbox}] {pri_prefix}{title}{meta}"
 
     # Group tasks by status and sort
     open_tasks = _sort_tasks([t for t in tasks if t.get("status") == "open"])
@@ -532,13 +567,23 @@ def parse_todo_line(raw):
     return title, tags, due, priority
 
 
-def find_task_by_title(tasks, title):
-    """Simple fuzzy match by title substring."""
+def find_task_by_title(tasks, title, exclude_ids=None):
+    """Simple fuzzy match by title substring.
+
+    exclude_ids: 可选集合，用于排除已经匹配过的任务 id，
+    防止同一行多次命中同一个任务。
+    """
     norm = title.strip()
+    exclude_ids = exclude_ids or set()
+
     for t in tasks:
+        if t.get("id") in exclude_ids:
+            continue
         if t.get("title", "").strip() == norm:
             return t
     for t in tasks:
+        if t.get("id") in exclude_ids:
+            continue
         if norm and norm in t.get("title", ""):
             return t
     return None
@@ -677,6 +722,26 @@ def main():
         sys.exit(1)
 
     text = INBOX_FILE.read_text(encoding="utf-8")
+
+    # 每次运行时，先检查 current.md 中是否存在“今天”的日期块；
+    # 如果只有一个较早日期的块，则自动将其日期更新为今天，避免
+    # 新写的 LOG 继续被记入昨天的日志文件。
+    today_str = date.today().strftime("%Y-%m-%d")
+    lines_for_roll = text.splitlines()
+    has_today_header = any(
+        (m := UPDATE_HEADER_RE.match(l)) and m.group("dt").split()[0] == today_str
+        for l in lines_for_roll
+    )
+    if not has_today_header:
+        for idx, line in enumerate(lines_for_roll):
+            m = UPDATE_HEADER_RE.match(line)
+            if not m:
+                continue
+            # 只滚动第一个日期块到今天（不保留时间部分）
+            lines_for_roll[idx] = f"## {today_str}"
+            text = "\n".join(lines_for_roll) + ("\n" if text.endswith("\n") else "")
+            break
+
     blocks = parse_inbox_blocks(text)
 
     tasks = load_tasks()
