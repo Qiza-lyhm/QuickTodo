@@ -867,6 +867,63 @@ def _generate_latest():
 
         per_day_log[d] = log_lines
 
+    # 读取任务信息，用于根据实际创建/更新时间来确定展示在哪一天
+    tasks = load_tasks()
+
+    def _parse_ts(ts_str: str | None):
+        if not ts_str:
+            return None
+        try:
+            return datetime.strptime(ts_str, "%Y-%m-%d %H:%M")
+        except Exception:
+            return None
+
+    # 根据标题选择“最近更新”的那个任务
+    tasks_by_title: dict[str, dict] = {}
+    for t in tasks:
+        title = (t.get("title") or "").strip()
+        if not title:
+            continue
+        cand_ts = _parse_ts(t.get("updated_at") or t.get("created_at"))
+        existing = tasks_by_title.get(title)
+        if existing is None:
+            tasks_by_title[title] = {"task": t, "ts": cand_ts}
+        else:
+            if cand_ts and (existing["ts"] is None or cand_ts > existing["ts"]):
+                tasks_by_title[title] = {"task": t, "ts": cand_ts}
+
+    def _display_date_for_rec(rec: dict) -> date | None:
+        """决定该 TODO 记录应归到哪一天展示。
+
+        优先使用 tasks.yaml 中的创建/更新时间（真实时间），
+        避免因为 current.md 里使用了旧日期头导致 latest 按旧日期分组。
+        """
+        title = rec["title"]
+        holder = tasks_by_title.get(title)
+        last_dt = rec.get("last_dt")
+        # 默认使用日志中的日期
+        fallback = last_dt.date() if last_dt else None
+
+        if not holder:
+            return fallback
+
+        task = holder["task"]
+        last_type = rec.get("last_type")
+
+        # 完成 / 删除 / 彻底删除：使用 updated_at 的日期
+        if last_type in {"done", "delete", "drop"}:
+            dts = _parse_ts(task.get("updated_at"))
+            if dts:
+                return dts.date()
+
+        # 仅添加：使用 created_at 的日期
+        if last_type == "add":
+            dts = _parse_ts(task.get("created_at"))
+            if dts:
+                return dts.date()
+
+        return fallback
+
     # 按天输出：保持原有 "## 日期 + LOG + TODO 操作" 结构
     for d in days:
         date_str = d.strftime("%Y-%m-%d")
@@ -874,8 +931,7 @@ def _generate_latest():
 
         # 如果这一天既没有 LOG 也没有 TODO 操作，则跳过
         has_todo_for_day = any(
-            rec.get("last_dt") and rec["last_dt"].date() == d
-            for rec in todo_summary.values()
+            _display_date_for_rec(rec) == d for rec in todo_summary.values()
         )
         if not log_lines and not has_todo_for_day:
             continue
@@ -917,9 +973,7 @@ def _generate_latest():
         # - 以最后一次状态和时间为准；
         # - 如果最后一次是 "彻底删除"，单独保留为 "彻底删除TODO项目"，不与其他状态合并。
         day_recs = [
-            rec
-            for rec in todo_summary.values()
-            if rec.get("last_dt") and rec["last_dt"].date() == d
+            rec for rec in todo_summary.values() if _display_date_for_rec(rec) == d
         ]
 
         if day_recs:
