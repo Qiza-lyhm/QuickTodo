@@ -1057,6 +1057,28 @@ def _generate_latest():
                 has_delete = rec["has_delete"]
                 has_drop = rec["has_drop"]
 
+                # 取出对应任务的优先级和标签（如果存在），用于展示
+                title = rec["title"]
+                holder = tasks_by_title.get(title)
+                pri_prefix = ""
+                meta = ""
+                if holder is not None:
+                    task = holder["task"]
+                    priority = task.get("priority")
+                    tags = task.get("tags") or []
+                    due = task.get("due")
+
+                    if priority is not None:
+                        pri_prefix = f"{{{priority}}} "
+
+                    meta_parts = []
+                    if tags:
+                        meta_parts.append("@" + ",@".join(tags))
+                    if due:
+                        meta_parts.append(f"due:{due}")
+                    if meta_parts:
+                        meta = f" ({', '.join(meta_parts)})"
+
                 # 根据合并后的最终状态选择描述文案
                 if last_type == "drop" and has_drop:
                     # 彻底删除单独保留
@@ -1074,7 +1096,10 @@ def _generate_latest():
                 else:
                     label = "TODO项目变更"
 
-                parts.append(f"- {time_str} {label}：{rec['title']}")
+                # 在 latest 中也展示与 current 相同的优先级与标签格式
+                parts.append(
+                    f"- {time_str} {label}：{pri_prefix}{title}{meta}"
+                )
             parts.append("")
 
     LATEST_FILE.write_text("\n".join(parts) + "\n", encoding="utf-8")
