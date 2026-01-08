@@ -1,0 +1,10 @@
+paths:
+  inbox: inbox
+  logs: logs
+  todos: todos
+  latest: latest.md
+
+todo:
+  sort_mode: priority
+  tag_index_for_sort: 0
+  default_priority: 5

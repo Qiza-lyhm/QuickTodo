@@ -1,3 +1,5 @@
+import argparse
+import os
 import re
 import sys
 from datetime import datetime, date, timedelta
@@ -5,6 +7,7 @@ from pathlib import Path
 import yaml
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+# Default locations (may be overridden by config or CLI/env)
 INBOX_FILE = BASE_DIR / "inbox" / "current.md"
 LOGS_DIR = BASE_DIR / "logs"
 TODOS_DIR = BASE_DIR / "todos"
@@ -12,6 +15,9 @@ TASKS_FILE = TODOS_DIR / "tasks.yaml"
 TODO_MD_FILE = TODOS_DIR / "todo.md"
 LATEST_FILE = BASE_DIR / "latest.md"
 CONFIG_FILE = BASE_DIR / "config.yaml"
+
+# Environment variable name to point to an alternative config file
+CONFIG_ENV_VAR = "QUICKTODO_CONFIG"
 
 
 def load_tasks():
@@ -33,10 +39,11 @@ def load_config():
       tag_index_for_sort: 0
       default_priority: 5
     """
-    if not CONFIG_FILE.exists():
+    # CONFIG_FILE should already be set to the desired path
+    if not Path(CONFIG_FILE).exists():
         return {}
     try:
-        data = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
+        data = yaml.safe_load(Path(CONFIG_FILE).read_text(encoding="utf-8"))
     except Exception:
         return {}
     return data or {}
@@ -50,6 +57,47 @@ def _get_todo_config():
         "tag_index_for_sort": int(todo_cfg.get("tag_index_for_sort", 0) or 0),
         "default_priority": int(todo_cfg.get("default_priority", 5) or 5),
     }
+
+
+def _apply_paths_from_config():
+    """Read `paths` section from loaded config and override module-level paths."""
+    global INBOX_FILE, LOGS_DIR, TODOS_DIR, TASKS_FILE, TODO_MD_FILE, LATEST_FILE
+    cfg = load_config()
+    paths = cfg.get("paths") or {}
+
+    # Helper to resolve relative paths against the config file location (if available)
+    cfg_path = Path(CONFIG_FILE) if CONFIG_FILE else None
+    cfg_base = cfg_path.parent if cfg_path and cfg_path.exists() else BASE_DIR
+
+    def _resolve(p):
+        if not p:
+            return None
+        p_obj = Path(p)
+        if not p_obj.is_absolute():
+            return (cfg_base / p_obj).resolve()
+        return p_obj.resolve()
+
+    inbox_p = _resolve(paths.get("inbox"))
+    logs_p = _resolve(paths.get("logs"))
+    todos_p = _resolve(paths.get("todos"))
+    latest_p = _resolve(paths.get("latest"))
+
+    if inbox_p:
+        # If the configured inbox path is a directory, default to current.md inside it
+        if inbox_p.exists() and inbox_p.is_dir():
+            INBOX_FILE = inbox_p / "current.md"
+        else:
+            INBOX_FILE = inbox_p
+    if logs_p:
+        LOGS_DIR = logs_p
+    if todos_p:
+        TODOS_DIR = todos_p
+    if latest_p:
+        LATEST_FILE = latest_p
+
+    # Derived filenames
+    TASKS_FILE = TODOS_DIR / "tasks.yaml"
+    TODO_MD_FILE = TODOS_DIR / "todo.md"
 
 
 def save_tasks(tasks):
@@ -227,6 +275,10 @@ def parse_inbox_todo_section(text):
         if not title:
             continue
 
+        # 如果标题以 Markdown heading 开头（例如 "# ..." / "## ..."），把它视为标题项并跳过，
+        # 避免像 "## TODO LIST" 这类标签被误识别为 TODO 标题。
+        if title.lstrip().startswith("#") or re.match(r"^[#\s]+$", title):
+            continue
         items.append(
             {
                 "section": section,
@@ -548,6 +600,8 @@ def parse_todo_line(raw):
     line = raw.strip()
     # remove leading checkbox "- [ ]" or "- [x]" or "- [v]" if present
     line = re.sub(r"^[-*]\s*\[(?: |x|X|v|V)\]\s*", "", line)
+    # also remove a plain leading list marker "- " or "* " if present
+    line = re.sub(r"^[-*]\s+", "", line)
     # Extract due:YYYY-MM-DD
     due = None
     m_due = re.search(r"due:(\d{4}-\d{2}-\d{2})", line)
@@ -717,6 +771,21 @@ def clean_inbox(text, processed_blocks):
 
 
 def main():
+    # CLI / env handling: allow selecting a config file which may override paths
+    parser = argparse.ArgumentParser(description="QuickTodo update script")
+    parser.add_argument("--config", "-c", help="path to config.yaml to use")
+    args = parser.parse_args()
+
+    # If --config provided, use it; otherwise allow env var; otherwise default CONFIG_FILE
+    global CONFIG_FILE
+    if args.config:
+        CONFIG_FILE = str(Path(args.config).resolve())
+    elif os.environ.get(CONFIG_ENV_VAR):
+        CONFIG_FILE = str(Path(os.environ.get(CONFIG_ENV_VAR)).resolve())
+
+    # apply any custom paths from the loaded config
+    _apply_paths_from_config()
+
     if not INBOX_FILE.exists():
         print(f"Inbox file not found: {INBOX_FILE}")
         sys.exit(1)
